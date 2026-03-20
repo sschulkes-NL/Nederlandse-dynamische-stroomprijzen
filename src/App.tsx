@@ -177,13 +177,40 @@ async function fetchEnergyZeroPrices(dateString: string): Promise<ApiPrice[]> {
     }));
 }
 
-async function fetchUpcomingWindowPrices(dateKey: string): Promise<ApiPrice[]> {
-  const tomorrow = addDays(dateKey, 1);
-  const [todayPrices, tomorrowPrices] = await Promise.all([
-    fetchEnergyZeroPrices(dateKey),
-    fetchEnergyZeroPrices(tomorrow),
-  ]);
-  return [...todayPrices, ...tomorrowPrices];
+async function fetchEnergyZeroPrices(dateString: string): Promise<ApiPrice[]> {
+  const { fromDate, tillDate } = localDateRangeToIso(dateString);
+  const url = API_BASE.startsWith("http")
+    ? new URL(API_BASE)
+    : new URL(API_BASE, window.location.origin);
+
+  url.searchParams.set("fromDate", fromDate);
+  url.searchParams.set("tillDate", tillDate);
+  url.searchParams.set("interval", "4");
+  url.searchParams.set("usageType", "1");
+  url.searchParams.set("inclBtw", "true");
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Ophalen mislukt (${res.status})`);
+  }
+
+  const data = await res.json();
+  const raw = Array.isArray(data?.Prices)
+    ? data.Prices
+    : Array.isArray(data?.prices)
+      ? data.prices
+      : [];
+
+  return raw
+    .filter((item: any) => item && typeof item.readingDate === "string" && typeof item.price === "number")
+    .map((item: any) => ({
+      readingDate: item.readingDate,
+      price: tibberVariablePriceInclVat(item.price),
+    }));
 }
 
 function aggregateByDateHour(prices: ApiPrice[]) {
