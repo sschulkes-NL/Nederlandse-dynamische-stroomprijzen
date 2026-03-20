@@ -146,39 +146,6 @@ function makeDateHourKey(dateKey: string, hour: number) {
 
 async function fetchEnergyZeroPrices(dateString: string): Promise<ApiPrice[]> {
   const { fromDate, tillDate } = localDateRangeToIso(dateString);
-  const url = new URL(API_BASE);
-  url.searchParams.set("fromDate", fromDate);
-  url.searchParams.set("tillDate", tillDate);
-  url.searchParams.set("interval", "4");
-  url.searchParams.set("usageType", "1");
-  url.searchParams.set("inclBtw", "true");
-
-  const res = await fetch(url.toString(), {
-    method: "GET",
-    headers: { Accept: "application/json" },
-  });
-
-  if (!res.ok) {
-    throw new Error(`Ophalen mislukt (${res.status})`);
-  }
-
-  const data = await res.json();
-  const raw = Array.isArray(data?.Prices)
-    ? data.Prices
-    : Array.isArray(data?.prices)
-      ? data.prices
-      : [];
-
-  return raw
-    .filter((item: any) => item && typeof item.readingDate === "string" && typeof item.price === "number")
-    .map((item: any) => ({
-      readingDate: item.readingDate,
-      price: tibberVariablePriceInclVat(item.price),
-    }));
-}
-
-async function fetchEnergyZeroPrices(dateString: string): Promise<ApiPrice[]> {
-  const { fromDate, tillDate } = localDateRangeToIso(dateString);
   const url = API_BASE.startsWith("http")
     ? new URL(API_BASE)
     : new URL(API_BASE, window.location.origin);
@@ -211,6 +178,15 @@ async function fetchEnergyZeroPrices(dateString: string): Promise<ApiPrice[]> {
       readingDate: item.readingDate,
       price: tibberVariablePriceInclVat(item.price),
     }));
+}
+
+async function fetchUpcomingWindowPrices(dateKey: string): Promise<ApiPrice[]> {
+  const tomorrow = addDays(dateKey, 1);
+  const [todayPrices, tomorrowPrices] = await Promise.all([
+    fetchEnergyZeroPrices(dateKey),
+    fetchEnergyZeroPrices(tomorrow),
+  ]);
+  return [...todayPrices, ...tomorrowPrices];
 }
 
 function aggregateByDateHour(prices: ApiPrice[]) {
@@ -295,6 +271,7 @@ function runSelfTests() {
 
   const checks: Array<[string, boolean]> = [
     ["tibber price adds fee and tax", tibberVariablePriceInclVat(0.1) === 0.2356],
+    ["relative api base is configured", API_BASE === "/api/prices"],
     ["formatDateInput formats date", formatDateInput(new Date("2026-03-19T12:00:00Z")).includes("2026-")],
     ["formatEuro handles null", formatEuro(null) === "Nog niet bekend"],
     ["colorForValue handles missing", colorForValue(null, 0, 1) === MISSING_COLOR],
