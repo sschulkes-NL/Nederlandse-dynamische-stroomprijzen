@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { RefreshCw, AlertCircle, Clock3, TrendingDown, TrendingUp } from "lucide-react";
+import { RefreshCw, AlertCircle, ChevronDown, ChevronUp } from "lucide-react";
 
 const TZ = "Europe/Amsterdam";
 const API_BASE = "/api/prices";
 const MISSING_COLOR = "#E5E7EB";
+const TIBBER_PURCHASE_FEE_INCL_VAT = 0.0248;
+const ELECTRICITY_TAX_INCL_VAT = 0.1108;
 
 type ApiPrice = {
   price: number;
@@ -27,6 +29,10 @@ type RingSlice = {
 
 type DateHourMap = Record<string, HourPoint>;
 
+function tibberVariablePriceInclVat(baseMarketPrice: number) {
+  return baseMarketPrice + TIBBER_PURCHASE_FEE_INCL_VAT + ELECTRICITY_TAX_INCL_VAT;
+}
+
 function formatDateInput(date: Date) {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
@@ -35,7 +41,7 @@ function formatDateInput(date: Date) {
 }
 
 function formatEuro(value: number | null, digits = 4) {
-  if (value == null || Number.isNaN(value)) return "–";
+  if (value == null || Number.isNaN(value)) return "Nog niet bekend";
   return new Intl.NumberFormat("nl-NL", {
     style: "currency",
     currency: "EUR",
@@ -138,9 +144,9 @@ function makeDateHourKey(dateKey: string, hour: number) {
   return `${dateKey}-${hour}`;
 }
 
-async function fetchEnergyPrices(dateString: string): Promise<ApiPrice[]> {
+async function fetchEnergyZeroPrices(dateString: string): Promise<ApiPrice[]> {
   const { fromDate, tillDate } = localDateRangeToIso(dateString);
-  const url = new URL(API_BASE, window.location.origin);
+  const url = new URL(API_BASE);
   url.searchParams.set("fromDate", fromDate);
   url.searchParams.set("tillDate", tillDate);
   url.searchParams.set("interval", "4");
@@ -165,14 +171,17 @@ async function fetchEnergyPrices(dateString: string): Promise<ApiPrice[]> {
 
   return raw
     .filter((item: any) => item && typeof item.readingDate === "string" && typeof item.price === "number")
-    .map((item: any) => ({ readingDate: item.readingDate, price: item.price }));
+    .map((item: any) => ({
+      readingDate: item.readingDate,
+      price: tibberVariablePriceInclVat(item.price),
+    }));
 }
 
 async function fetchUpcomingWindowPrices(dateKey: string): Promise<ApiPrice[]> {
   const tomorrow = addDays(dateKey, 1);
   const [todayPrices, tomorrowPrices] = await Promise.all([
-    fetchEnergyPrices(dateKey),
-    fetchEnergyPrices(tomorrow),
+    fetchEnergyZeroPrices(dateKey),
+    fetchEnergyZeroPrices(tomorrow),
   ]);
   return [...todayPrices, ...tomorrowPrices];
 }
@@ -227,17 +236,12 @@ function buildUpcomingRing(hourMap: DateHourMap, now: Date): RingSlice[] {
   });
 }
 
-function currentHourInAmsterdam(now: Date) {
-  return getDatePartsInTZ(now, TZ).hour;
-}
-
 function analogHands(now: Date) {
   const parts = getDatePartsInTZ(now, TZ);
   const hour12 = parts.hour % 12;
   const minuteAngle = parts.minute * 6 + parts.second * 0.1;
   const hourAngle = hour12 * 30 + parts.minute * 0.5;
-  const secondAngle = parts.second * 6;
-  return { hourAngle, minuteAngle, secondAngle, parts };
+  return { hourAngle, minuteAngle };
 }
 
 function getHourSectorAngles(hour24: number) {
@@ -247,19 +251,25 @@ function getHourSectorAngles(hour24: number) {
   return { start, end, center };
 }
 
+function formatSliceSubLabel(slice: RingSlice, index: number, todayKey: string) {
+  if (index === 0) return "Nu";
+  return slice.dateKey === todayKey ? "Vandaag" : "Morgen";
+}
+
 function runSelfTests() {
   const sampleHours: DateHourMap = {
-    [makeDateHourKey("2026-03-19", 23)]: { hour: 23, value: 0.25, count: 1, points: [] },
-    [makeDateHourKey("2026-03-20", 0)]: { hour: 0, value: 0.11, count: 1, points: [] },
-    [makeDateHourKey("2026-03-20", 1)]: { hour: 1, value: 0.12, count: 1, points: [] },
+    [makeDateHourKey("2026-03-19", 23)]: { hour: 23, value: tibberVariablePriceInclVat(0.25), count: 1, points: [] },
+    [makeDateHourKey("2026-03-20", 0)]: { hour: 0, value: tibberVariablePriceInclVat(0.11), count: 1, points: [] },
+    [makeDateHourKey("2026-03-20", 1)]: { hour: 1, value: tibberVariablePriceInclVat(0.12), count: 1, points: [] },
   };
 
   const ring = buildUpcomingRing(sampleHours, new Date("2026-03-19T22:15:00Z"));
   const emptyRing = buildUpcomingRing({}, new Date("2026-03-19T10:15:00Z"));
 
   const checks: Array<[string, boolean]> = [
+    ["tibber price adds fee and tax", tibberVariablePriceInclVat(0.1) === 0.2356],
     ["formatDateInput formats date", formatDateInput(new Date("2026-03-19T12:00:00Z")).includes("2026-")],
-    ["formatEuro handles null", formatEuro(null) === "–"],
+    ["formatEuro handles null", formatEuro(null) === "Nog niet bekend"],
     ["colorForValue handles missing", colorForValue(null, 0, 1) === MISSING_COLOR],
     ["donutPath returns svg path", donutPath(100, 100, 80, 50, -15, 15).includes("A 80 80")],
     ["addDays increments date", addDays("2026-03-19", 1) === "2026-03-20"],
@@ -272,6 +282,7 @@ function runSelfTests() {
     ["midnight sector starts at 12 o'clock", getHourSectorAngles(0).start === 0],
     ["13:00 sector maps to 1 o'clock", getHourSectorAngles(13).start === 30],
     ["23:00 sector center is between 11 and 12", getHourSectorAngles(23).center === 345],
+    ["sub label now works", formatSliceSubLabel(ring[0], 0, "2026-03-19") === "Nu"],
   ];
 
   const failed = checks.filter(([, ok]) => !ok);
@@ -307,7 +318,6 @@ function AnalogPriceClock({
 
   const handHourEnd = linePoint(center, center, 85, hands.hourAngle);
   const handMinuteEnd = linePoint(center, center, 120, hands.minuteAngle);
-  const handSecondEnd = linePoint(center, center, 130, hands.secondAngle);
 
   return (
     <div className="flex flex-col items-center gap-4">
@@ -317,7 +327,6 @@ function AnalogPriceClock({
           const fill = colorForValue(slice.value, min, max);
           const path = donutPath(center, center, outerRadius, innerRadius, start, end);
           const textPos = polar(center, center, (outerRadius + innerRadius) / 2, sectorCenter);
-          const dayPos = polar(center, center, outerRadius + 24, sectorCenter);
 
           return (
             <g key={`${slice.dateKey}-${slice.hour}-${index}`}>
@@ -327,11 +336,13 @@ function AnalogPriceClock({
                 stroke={slice.isCurrentHour ? "#0F172A" : "white"}
                 strokeWidth={slice.isCurrentHour ? 5 : 3}
               />
-              <text x={textPos.x} y={textPos.y + 5} textAnchor="middle" className="fill-slate-900 text-[16px] font-bold">
+              <text
+                x={textPos.x}
+                y={textPos.y + 5}
+                textAnchor="middle"
+                className="fill-slate-900 text-[16px] font-bold"
+              >
                 {slice.label}
-              </text>
-              <text x={dayPos.x} y={dayPos.y + 4} textAnchor="middle" className="fill-slate-400 text-[10px] font-semibold">
-                {slice.dateKey.slice(8, 10)}
               </text>
             </g>
           );
@@ -341,7 +352,13 @@ function AnalogPriceClock({
         <circle cx={center} cy={center} r={8} fill="#0F172A" />
 
         {hourNumbers.map((item) => (
-          <text key={item.analog} x={item.x} y={item.y + 5} textAnchor="middle" className="fill-slate-500 text-[20px] font-semibold">
+          <text
+            key={item.analog}
+            x={item.x}
+            y={item.y + 5}
+            textAnchor="middle"
+            className="fill-slate-500 text-[20px] font-semibold"
+          >
             {item.analog}
           </text>
         ))}
@@ -363,22 +380,24 @@ function AnalogPriceClock({
           );
         })}
 
-        <line x1={center} y1={center} x2={handHourEnd.x} y2={handHourEnd.y} stroke="#0F172A" strokeWidth="7" strokeLinecap="round" />
-        <line x1={center} y1={center} x2={handMinuteEnd.x} y2={handMinuteEnd.y} stroke="#334155" strokeWidth="4" strokeLinecap="round" />
-        <line x1={center} y1={center} x2={handSecondEnd.x} y2={handSecondEnd.y} stroke="#DC2626" strokeWidth="2" strokeLinecap="round" />
-
-        <text x={center} y={center - 28} textAnchor="middle" className="fill-slate-900 text-[18px] font-bold">
-          Komende 12 uur
-        </text>
-        <text x={center} y={center - 4} textAnchor="middle" className="fill-slate-500 text-[12px]">
-          Het actuele uur staat op zijn echte klokpositie
-        </text>
-        <text x={center} y={center + 18} textAnchor="middle" className="fill-slate-500 text-[12px]">
-          Lichtgrijs = nog geen prijs bekend
-        </text>
-        <text x={center} y={center + 44} textAnchor="middle" className="fill-slate-900 text-[22px] font-bold">
-          {String(hands.parts.hour).padStart(2, "0")}:{String(hands.parts.minute).padStart(2, "0")}
-        </text>
+        <line
+          x1={center}
+          y1={center}
+          x2={handHourEnd.x}
+          y2={handHourEnd.y}
+          stroke="#0F172A"
+          strokeWidth="7"
+          strokeLinecap="round"
+        />
+        <line
+          x1={center}
+          y1={center}
+          x2={handMinuteEnd.x}
+          y2={handMinuteEnd.y}
+          stroke="#334155"
+          strokeWidth="4"
+          strokeLinecap="round"
+        />
       </svg>
     </div>
   );
@@ -389,6 +408,7 @@ export default function DynamicEnergyClockApp() {
   const [prices, setPrices] = useState<ApiPrice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   const nowParts = useMemo(() => getDatePartsInTZ(now, TZ), [now]);
@@ -403,7 +423,10 @@ export default function DynamicEnergyClockApp() {
       setPrices(result);
       setLastUpdated(new Date().toLocaleString("nl-NL", { timeZone: TZ }));
     } catch (err: any) {
-      setError(err?.message || "De prijsfeed kon niet direct worden geladen. Controleer of de Vercel API-route /api/prices werkt.");
+      setError(
+        err?.message ||
+          "De prijsfeed kon niet direct worden geladen. Mogelijk blokkeert de browser cross-origin requests."
+      );
     } finally {
       setLoading(false);
     }
@@ -427,103 +450,102 @@ export default function DynamicEnergyClockApp() {
   const max = validValues.length ? Math.max(...validValues) : 1;
   const cheapest = slices.filter((s) => s.value != null).sort((a, b) => (a.value as number) - (b.value as number))[0];
   const mostExpensive = slices.filter((s) => s.value != null).sort((a, b) => (b.value as number) - (a.value as number))[0];
-  const activeHour = currentHourInAmsterdam(now);
   const missingCount = slices.filter((s) => s.value == null).length;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-6xl px-6 py-8">
-        <div className="mb-6 flex flex-col gap-4 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm md:flex-row md:items-end md:justify-between">
-          <div>
-            <div className="mb-2 text-sm font-semibold uppercase tracking-[0.18em] text-slate-500">Nederlandse dynamische stroomprijzen</div>
-            <h1 className="text-3xl font-bold tracking-tight">Analoge prijs-klok</h1>
-            <p className="mt-2 max-w-2xl text-sm text-slate-600">
-              De klok toont altijd de komende 12 uur op echte klokposities. Elk heel uur schuift het venster door. Ontbrekende prijzen blijven lichtgrijs totdat ze bekend zijn.
-            </p>
-          </div>
-
-          <button onClick={() => load(todayKey)} className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:opacity-90">
-            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-            Vernieuwen
-          </button>
-        </div>
-
         {error && (
           <div className="mb-6 flex items-start gap-3 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
             <div>
               <div className="font-semibold">Ophalen is niet gelukt</div>
-              <div className="text-sm">{error}</div>
+              <div className="text-sm">
+                {error} Als dit in een gewone browser gebeurt, dan is de kans groot dat er een kleine proxy of serverless functie tussen moet.
+              </div>
             </div>
           </div>
         )}
 
-        <div className="mb-6 grid gap-4 md:grid-cols-4">
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="mb-2 flex items-center gap-2 text-slate-500">
-              <TrendingDown className="h-4 w-4" />
-              <span className="text-sm font-medium">Goedkoopste uur</span>
-            </div>
-            <div className="text-2xl font-bold">{cheapest ? `${cheapest.label}:00` : "–"}</div>
-            <div className="mt-1 text-sm text-slate-600">{cheapest ? formatEuro(cheapest.value) : "Geen data"}</div>
-          </div>
-
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="mb-2 flex items-center gap-2 text-slate-500">
-              <TrendingUp className="h-4 w-4" />
-              <span className="text-sm font-medium">Duurste uur</span>
-            </div>
-            <div className="text-2xl font-bold">{mostExpensive ? `${mostExpensive.label}:00` : "–"}</div>
-            <div className="mt-1 text-sm text-slate-600">{mostExpensive ? formatEuro(mostExpensive.value) : "Geen data"}</div>
-          </div>
-
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="mb-2 flex items-center gap-2 text-slate-500">
-              <Clock3 className="h-4 w-4" />
-              <span className="text-sm font-medium">Nu in Amsterdam</span>
-            </div>
-            <div className="text-2xl font-bold">{String(activeHour).padStart(2, "0")}:00</div>
-            <div className="mt-1 text-sm text-slate-600">Donker omlijnd segment = dit uur</div>
-          </div>
-
-          <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="mb-2 text-sm font-medium text-slate-500">Laatste update</div>
-            <div className="text-lg font-bold">{lastUpdated ?? "–"}</div>
-            <div className="mt-1 text-sm text-slate-600">{missingCount} uur zonder prijs</div>
-          </div>
-        </div>
-
         <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="mb-5 flex items-center justify-between">
-              <div>
-                <h2 className="text-xl font-bold">Komende 12 uur op één klok</h2>
-                <p className="text-sm text-slate-600">Groen is goedkoop, rood is duur. Elk uur schuift het venster automatisch door naar het volgende uur.</p>
+            <div className="mb-4 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+              <div className="max-w-3xl">
+                <h1 className="text-2xl font-bold tracking-tight">Tibber Energieprijzen komende 12 uur</h1>
+                <p className="mt-2 text-sm text-slate-600">
+                  Groen is goedkoop, rood is duur. Elk uur schuift het venster automatisch door naar het volgende uur.
+                </p>
               </div>
-              <div className="rounded-2xl border border-slate-200 px-3 py-2 text-xs text-slate-500">
-                schaal: {formatEuro(min)} → {formatEuro(max)}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => setShowDetails((prev) => !prev)}
+                  className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+                >
+                  {showDetails ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                  {showDetails ? "Minder info" : "Meer info"}
+                </button>
+                <button
+                  onClick={() => load(todayKey)}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:opacity-90"
+                >
+                  <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+                  Vernieuwen
+                </button>
               </div>
             </div>
+
+            {showDetails && (
+              <div className="mb-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-sm font-medium text-slate-500">Goedkoopste uur</div>
+                  <div className="mt-2 text-2xl font-bold text-slate-900">{cheapest ? `${cheapest.label}:00` : "–"}</div>
+                  <div className="mt-1 text-sm text-slate-600">{cheapest ? formatEuro(cheapest.value, 4) : "Geen data"}</div>
+                  <div className="mt-1 text-xs text-slate-500">Variabele Tibber-prijs</div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-sm font-medium text-slate-500">Duurste uur</div>
+                  <div className="mt-2 text-2xl font-bold text-slate-900">{mostExpensive ? `${mostExpensive.label}:00` : "–"}</div>
+                  <div className="mt-1 text-sm text-slate-600">{mostExpensive ? formatEuro(mostExpensive.value, 4) : "Geen data"}</div>
+                  <div className="mt-1 text-xs text-slate-500">Variabele Tibber-prijs</div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-sm font-medium text-slate-500">Nu in Amsterdam</div>
+                  <div className="mt-2 text-2xl font-bold text-slate-900">{String(nowParts.hour).padStart(2, "0")}:00</div>
+                  <div className="mt-1 text-sm text-slate-600">Donker omlijnd segment = dit uur</div>
+                </div>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-sm font-medium text-slate-500">Laatste update</div>
+                  <div className="mt-2 text-lg font-bold text-slate-900">{lastUpdated ?? "–"}</div>
+                  <div className="mt-1 text-sm text-slate-600">{missingCount} uur zonder prijs</div>
+                  <div className="mt-1 text-xs text-slate-500">Excl. netbeheer en €5,99 p/m</div>
+                </div>
+              </div>
+            )}
 
             <AnalogPriceClock slices={slices} min={min} max={max} now={now} />
           </div>
 
           <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-            <h2 className="mb-4 text-xl font-bold">Komende 12 uur</h2>
+            <h2 className="mb-1 text-xl font-bold">Uren en prijzen</h2>
+            <p className="mb-4 text-sm text-slate-600">Van nu tot 12 uur vooruit.</p>
+            <p className="mb-4 text-xs text-slate-500">Alle bedragen zijn Tibber variabele prijzen incl. energiebelasting, btw en inkoopvergoeding.</p>
             <div className="space-y-2">
               {slices.map((slice, index) => {
                 const bg = colorForValue(slice.value, min, max);
                 return (
                   <div
                     key={`${slice.dateKey}-${slice.hour}-${index}`}
-                    className={`flex items-center justify-between rounded-2xl border px-3 py-2 ${index === 0 ? "border-slate-900" : "border-slate-200"}`}
+                    className={`flex items-center justify-between rounded-2xl border px-3 py-2 ${
+                      index === 0 ? "border-slate-900" : "border-slate-200"
+                    }`}
                     style={{ backgroundColor: bg }}
                   >
                     <div>
                       <div className="font-semibold">{slice.label}:00</div>
-                      <div className="text-xs text-slate-600">{slice.dateKey}</div>
+                      <div className="text-xs text-slate-600">{formatSliceSubLabel(slice, index, todayKey)}</div>
                     </div>
-                    <div className="text-sm font-medium">{formatEuro(slice.value)}</div>
+                    <div className="text-sm font-medium">{formatEuro(slice.value, 4)}</div>
                   </div>
                 );
               })}
